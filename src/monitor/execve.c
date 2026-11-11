@@ -1505,8 +1505,22 @@ static void cng_exec_reset(void) {
                 24 /* sizeof(struct robust_list_head) */, 0, 0, 0, 0);
     if (cng_g_brk0) {
         long cur = CNG_SYS(__NR_brk, 0, 0, 0, 0, 0, 0);
-        if (cur > 0 && (unsigned long)cur > cng_g_brk0)
-            CNG_SYS(__NR_brk, cng_g_brk0, 0, 0, 0, 0, 0);
+        if (cur > 0 && (unsigned long)cur > cng_g_brk0) {
+            /* The heap goes back to where it started, but not under a signal
+             * frame the guest still has to return through. The frame the kernel
+             * built for this trap lies on the guest's alternate signal stack,
+             * and the guest's own allocator may have put that stack in the
+             * heap. Shrinking past it unmapped the frame, and the write of the
+             * new program's registers into it faulted: SIGSEGV on the first
+             * exec, measured. The ceiling is the top of every live frame; where
+             * it reaches, the heap stays where it is. */
+            unsigned long target = cng_g_brk0;
+            unsigned long ceiling = cng_scr_frame_ceiling((unsigned long)cur);
+            if (ceiling > target)
+                target = cng_page_up(ceiling);
+            if ((unsigned long)cur > target)
+                CNG_SYS(__NR_brk, target, 0, 0, 0, 0, 0);
+        }
     }
 }
 

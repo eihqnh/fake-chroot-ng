@@ -940,7 +940,8 @@ static int proc_fd_dir(const char *canon) {
     return pl && strcmp(canon + pl, "fd") == 0;
 }
 
-static int proc_magic(char *cur, size_t sz) {
+static int proc_magic(char *cur, size_t sz, int last, int deref_final,
+                      int want_dir) {
     size_t pl = proc_pid_prefix(cur, 0);
     if (!pl)
         return PROC_MAGIC_NONE;
@@ -1004,6 +1005,21 @@ static int proc_magic(char *cur, size_t sz) {
      * verdict, and the walk answers it -ENAMETOOLONG — the XLATE_TOOLONG
      * rule, for a name the view cannot express. The fixup is handed the whole
      * buffer, so a target that fills it is told apart from one that fits. */
+    /* Not followed -- an lstat or an O_NOFOLLOW open on the link itself --
+     * the kernel's symlink is the answer, and expanding it here answered as
+     * if it had been followed. lstat then reported the target's file type, so
+     * a path that is plainly S_IFLNK was reached only by code that had
+     * already looked and seen a regular file (or a directory). Every Nix
+     * 2.3x nix goes through exactly that: read_symlink() in libstdc++ lstats
+     * first and throws EINVAL on anything that is not a link, and getSelfExe
+     * calls it on /proc/self/exe before it does anything else, so `nix
+     * --version` died at startup with "reading symbolic link
+     * \"/proc/self/exe\": Invalid argument". PROC_MAGIC_HOST hands the name
+     * to the kernel, which reports the magic link the way /proc does, and the
+     * walk's not-followed branch (which sees the same verdict) leaves it at
+     * that. */
+    if (last && !deref_final && !want_dir)
+        return PROC_MAGIC_HOST;
     char link[CNG_PATH_MAX], tmp[CNG_PATH_MAX];
     if (pl + vl >= sizeof link)
         return PROC_MAGIC_NONE;
@@ -1428,7 +1444,8 @@ int cng_resolve_lim(const char *path, int deref_final, char *out, size_t outsz,
          * name the view cannot express (see dev_magic). */
         if (dev_magic(canon, sizeof canon) < 0)
             return -ENAMETOOLONG;
-        int magic = proc_magic(canon, sizeof canon);
+        int magic = proc_magic(canon, sizeof canon, last, deref_final,
+                               want_dir);
         /* A magic link is a link: RESOLVE_NO_MAGICLINKS refuses it, and
          * RESOLVE_NO_SYMLINKS implies NO_MAGICLINKS. Both are ELOOP, which is
          * what the kernel answers for a constraint it cannot satisfy by

@@ -773,6 +773,65 @@ int cng_scr_hit(unsigned long lo, unsigned long hi) {
     return 0;
 }
 
+/* The top of every live signal frame below `limit`.
+ *
+ * The frame the kernel built for a trap belongs to the guest: the SIGSYS tier
+ * returns into the new program through rt_sigreturn, and what that reads is
+ * the frame the kernel built when it delivered the trap. The kernel puts that
+ * frame on the guest's alternate signal stack whenever the guest registered one
+ * and the handler asked for it — and where that stack is comes from the guest's
+ * own allocator, which on an Android guest is the heap. Giving the heap back
+ * unmapped the frame, and the write of the new program's registers into it
+ * faulted: SIGSEGV on the first exec, measured.
+ *
+ * SS_ONSTACK does not answer this. It says the interrupted stack pointer was
+ * inside the alternate stack, which holds only when the trap was taken while
+ * the thread already ran on it. A trap taken on the thread's ordinary stack is
+ * delivered *to* the alternate stack and comes back with SS_ONSTACK clear —
+ * the common case, and the one that faulted: the kernel writes the frame's
+ * uc_stack from the thread's own registration (unsafe_save_altstack), and the
+ * registration says nothing about where the frame went. The test is therefore
+ * geometric: is the frame inside the alternate stack the ucontext names?
+ *
+ * The whole alternate stack is kept, not just the bytes of the ucontext: the
+ * frame is a siginfo and a ucontext side by side, and the siginfo sits below
+ * the ucontext (struct rt_sigframe is { siginfo info; ucontext uc; }), so an
+ * extent that began at the ucontext would leave it out. Keeping the stack costs
+ * one alternate stack and not a chain of them: the frame is dead one generation
+ * later, when the next trap's frame is somewhere else.
+ *
+ * `limit` is the top of the region being given back. A frame above it is not
+ * in that region, and the reclaim cannot reach it. */
+unsigned long cng_scr_frame_ceiling(unsigned long limit) {
+    unsigned long ceiling = 0;
+    for (int i = 0; i < CNG_SCR_N; i++) {
+        struct cng_ucontext *uc = (struct cng_ucontext *)
+            __atomic_load_n(&cng_scr[i].uc, __ATOMIC_ACQUIRE);
+        if (!uc)
+            continue; /* no frame on this slot */
+        unsigned long u = (unsigned long)uc;
+        if (u >= limit)
+            continue; /* above the region: the reclaim cannot reach it */
+        unsigned long top = u + sizeof(struct cng_ucontext);
+        unsigned long sp = (unsigned long)uc->uc_stack.ss_sp;
+        unsigned long size = uc->uc_stack.ss_size;
+        /* u - sp < size, rather than u < sp + size, so that a stack whose end
+         * wraps cannot claim a frame it does not hold. */
+        if (size && sp && !(uc->uc_stack.ss_flags & CNG_SS_DISABLE) &&
+            u >= sp && u - sp < size) {
+            /* The frame is on the alternate stack: keep all of it. */
+            unsigned long end = sp + size;
+            if (end > top)
+                top = end;
+        }
+        if (top > limit)
+            top = limit;
+        if (top > ceiling)
+            ceiling = top;
+    }
+    return ceiling;
+}
+
 /* Is `tid` still a thread of this process? tgkill with signal 0 does the
  * existence check and delivers nothing — one syscall, where a /proc read would
  * be several, and this runs inside the handler. */

@@ -627,6 +627,10 @@ int cng_scratch_slot_for(long tid, unsigned long *hi_out);
 /* Does [lo, hi) touch a scratch stack? Asked by the exec reclaim, which
  * must not give a slot back as if it were the outgoing program's. */
 int cng_scr_hit(unsigned long lo, unsigned long hi);
+/* The top of every live signal frame below `limit`, or 0 when there is none:
+ * the exec reclaim must not give the heap back under a frame the guest still
+ * returns through. */
+unsigned long cng_scr_frame_ceiling(unsigned long limit);
 
 /* Install the SIGSYS handler alone (no filter, no probes): testing. */
 int cng_sigsys_install_only(void);
